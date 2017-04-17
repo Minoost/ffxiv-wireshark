@@ -1,5 +1,9 @@
+-- internal constants
+local FRAME_HEADER_LEN = 40
+local MSG_HEADER_LEN = 16
+
 -- create protocol
-ffxiv_proto = Proto("ffxiv", "FFXIV", "FINAL FANTASY XIV: Heavensward Protocol")
+local ffxiv_proto = Proto("ffxiv", "FFXIV", "FINAL FANTASY XIV: Heavensward Protocol")
 
 -- generic header offset
 local OFFSET_HEADER_TIMESTAMP         = 0x10 -- unixtime in millisecond
@@ -10,167 +14,190 @@ local OFFSET_HEADER_MSG_COUNT         = 0x1E -- number of messages in packet fra
 local OFFSET_HEADER_UNKNOWN2          = 0x20
 local OFFSET_HEADER_MSG_COMPRESSED    = 0x21 -- if 1, payload is compressed with deflate
 
+-- message subheader offset
+local OFFSET_SUBHEADER_MSG_TYPE = 0xC
+
 -- field display
-local MESSAGE_TYPE = {
+local MESSAGE_TYPE_DISPLAY = {
     [3] = "Normal?",
     [7] = "Ping",
     [8] = "Pong",
 }
 
 -- Protocol fields
-local pfield = {
-    header_unknown0			= ProtoField.bytes("ffxiv.header.unknown0", "Unknown0"),
-    header_unknown1 	    = ProtoField.uint16("ffxiv.header.unknown1", "Unknown1"),
-    header_unknown2 		= ProtoField.bool("ffxiv.header.unknown2", "Unknown2"),
-    header_timestamp 		= ProtoField.absolute_time("ffxiv.header.timestamp", "Frame Timestamp"),
-    header_frame_len 	    = ProtoField.uint32("ffxiv.header.length", "Frame Length"),
-    header_msg_count 		= ProtoField.uint16("ffxiv.header.msg_count", "Message Count"),
-    header_msg_compressed	= ProtoField.bool("ffxiv.header.compressed", "Payload is Compressed?"),
+local proto_field = {
+    -- generic header fields
+    frame_unknown0  = ProtoField.bytes("ffxiv.frame.unknown0", "Unknown0"),
+    frame_unknown1  = ProtoField.uint16("ffxiv.frame.unknown1", "Unknown1"),
+    frame_unknown2  = ProtoField.bool("ffxiv.frame.unknown2", "Unknown2"),
+    frame_len       = ProtoField.uint32("ffxiv.frame.length", "Frame Length"),
+    frame_timestamp = ProtoField.absolute_time("ffxiv.frame.timestamp", "Frame Timestamp"),
 
-    -- messages
-    subheader_msg_len       = ProtoField.uint32("ffxiv.msg.length", "Message Length"),
-    subheader_msg_type      = ProtoField.uint16("ffxiv.msg.type", "Message Type", nil, MESSAGE_TYPE),
+    -- message fields
+    msg_count      = ProtoField.uint16("ffxiv.message.count", "Message Count"),
+    msg_compressed = ProtoField.bool("ffxiv.message.compressed", "Payload is Compressed?"),
+    msg_len        = ProtoField.uint32("ffxiv.message.length", "Message Length"),
+    msg_type       = ProtoField.uint16("ffxiv.message.type", "Message Type", nil, MESSAGE_TYPE_DISPLAY),
 }
-ffxiv_proto.fields = pfield -- register field to protocol
+ffxiv_proto.fields = proto_field
 
-function ffxiv_proto.dissector(buf, pinfo, tree)
-    -- not enough data (not even frame header!)
-    if buf:len() < 40 then
-        return
-    end
-
-    pinfo.cols.protocol = "FFXIV" -- set protocol col name
-
-    local ptree = tree:add(ffxiv_proto, buf(), "FINAL FANTASY XIV: Heavensward")
-
-    -- add unknown fields
-    local utree = ptree:add(buf(0,0), "Unknown Fields")
-
-    local unknown0 = buf(0, 16)
-    local unknown1 = buf(OFFSET_HEADER_UNKNOWN1, 2)
-    local unknown2 = buf(OFFSET_HEADER_UNKNOWN2, 1)
-    utree:add   (pfield.header_unknown0, unknown0)
-    utree:add_le(pfield.header_unknown1, unknown1)
-    utree:add_le(pfield.header_unknown2, unknown2)
-
-    -- dissect header
-    local timestamp 	= buf(OFFSET_HEADER_TIMESTAMP, 8)
-    local timestamp_nst = nstime_from_unix_msec(timestamp:le_uint64())
-    local frame_len 	= buf(OFFSET_HEADER_FRAME_LEN, 4)
-    local msg_count 	= buf(OFFSET_HEADER_MSG_COUNT, 2)
-    local compressed	= buf(OFFSET_HEADER_MSG_COMPRESSED, 1)
-
-    ptree:add   (pfield.header_timestamp, timestamp, timestamp_nst)
-    ptree:add_le(pfield.header_frame_len, frame_len)
-    ptree:add   (pfield.header_msg_compressed, compressed)
-    ptree:add_le(pfield.header_msg_count, msg_count)
-
-    -- dissect messages
-    local mbuf = buf(40)
-    local mtree = ptree:add(mbuf, "Messages")
-    -- TODO: dissect messages!
-
-    -- handle desegment
-    if frame_len:le_uint() > buf:len() then
-        pinfo.desegment_len = frame_len:le_uint() - buf:len()
-    end
-
-    return frame_len:le_uint()
+function ffxiv_proto.init()
+    -- do nothing
 end
 
--- # Heuristic
---     This plugin attempt to find a packet that follows FFXIV protocol
---     convention and dissect it automatically.
---
---     This is done by:
---         1. check first 16 bytes of packet starts with predefined value
---         2. or length of tcp packet segment has a same value as
---         frame header length does
---
--- # Signature(16 bytes) disassembly:
--- In heavensward, first 16 bytes from header are hardcoded in subroutine
--- (or atleast inlined for optimization by compiler)
---
--- 01582ACD | C6 02 52                 | mov byte ptr ds:[edx],52
--- 01582AD0 | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582AD3 | C6 40 01 52              | mov byte ptr ds:[eax+1],52
--- 01582AD7 | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582ADA | C6 42 02 A0              | mov byte ptr ds:[edx+2],A0
--- 01582ADE | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582AE1 | C6 40 03 41              | mov byte ptr ds:[eax+3],41
--- 01582AE5 | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582AE8 | C6 42 04 FF              | mov byte ptr ds:[edx+4],FF
--- 01582AEC | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582AEF | C6 40 05 5D              | mov byte ptr ds:[eax+5],5D
--- 01582AF3 | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582AF6 | C6 42 06 46              | mov byte ptr ds:[edx+6],46
--- 01582AFA | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582AFD | C6 40 07 E2              | mov byte ptr ds:[eax+7],E2
--- 01582B01 | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582B04 | C6 42 08 7F              | mov byte ptr ds:[edx+8],7F
--- 01582B08 | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582B0B | C6 40 09 2A              | mov byte ptr ds:[eax+9],2A
--- 01582B0F | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582B12 | C6 42 0A 64              | mov byte ptr ds:[edx+A],64
--- 01582B16 | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582B19 | C6 40 0B 4D              | mov byte ptr ds:[eax+B],4D
--- 01582B1D | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582B20 | C6 42 0C 7B              | mov byte ptr ds:[edx+C],7B
--- 01582B24 | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582B27 | C6 40 0D 99              | mov byte ptr ds:[eax+D],99
--- 01582B2B | 8B 56 08                 | mov edx,dword ptr ds:[esi+8]
--- 01582B2E | C6 42 0E C4              | mov byte ptr ds:[edx+E],C4
--- 01582B32 | 8B 46 08                 | mov eax,dword ptr ds:[esi+8]
--- 01582B35 | 8B 55 FC                 | mov edx,dword ptr ss:[ebp-4]
--- 01582B38 | C6 40 0F 75              | mov byte ptr ds:[eax+F],75
+function ffxiv_proto.dissector(buf, pkt_info, tree)
+    local buf_offset = 0
 
--- register heuristic
-ffxiv_proto:register_heuristic("tcp", function (buf, pinfo, tree)
-    local result = is_ffxiv_packet(buf)
-    if result then
-        -- ffxiv packet detected, so let's dissect it!
-        ffxiv_proto.dissector(buf, pinfo, tree)
+    while buf:len() > buf_offset do
+        local frame_buf = buf:range(buf_offset)
+        local result = dissect_frame(frame_buf, pkt_info, tree)
+        if result > 0 then
+            -- successfully dissected!
+            pkt_info.cols.protocol = "FFXIV" -- set protocol name
+            buf_offset = buf_offset + result
+        elseif result < 0 then
+            -- need more data!
+            local bytes_needed = -result
+            pkt_info.desegment_offset = buf_offset
+            pkt_info.desegment_len = bytes_needed
 
-        -- stick with ffxiv protocol for this addr:port
-        pinfo.conversation = ffxiv_proto
+            -- set to eof
+            buf_offset = buf:len()
+        else
+            -- result == 0 means error while dissecting it
+            break
+        end
     end
-    return result
-end)
 
--- returns true if buf follows ffxiv packet convention, false otherwise.
-function is_ffxiv_packet(buf)
-    -- see if packet has enough room for frame header
-    -- if not, this packet is not for us
-    if buf:len() < 40 then
+    return buf_offset
+end
+
+-- TODO: split function
+function dissect_frame(buf, pkt_info, tree)
+    local frame_len = check_frame_length(buf)
+    if frame_len <= 0 then return frame_len end -- error or need more bytes
+
+    -- we're good now, let's dissect it!
+    local buf = buf:range(0, frame_len) -- ignore after frame length
+    local ffxiv_tree = tree:add(ffxiv_proto, buf, nil, "FINAL FANTASY XIV Network Protocol")
+
+    -- TODO: maybe just split between parsing part and tree part?
+    -- because it's bit stupid to place here for field order
+    ffxiv_tree:add(proto_field.frame_unknown0, buf(0, 16))
+    ffxiv_tree:add_le(proto_field.frame_unknown1, buf(OFFSET_HEADER_UNKNOWN1, 2))
+    ffxiv_tree:add_le(proto_field.frame_unknown2, buf(OFFSET_HEADER_UNKNOWN2, 1))
+
+    -- add frame length
+    ffxiv_tree:add_le(proto_field.frame_len, get_frame_length_tvb(buf))
+
+    -- add frame timestamp
+    local frame_timestamp     = buf(OFFSET_HEADER_TIMESTAMP, 8)
+    local frame_timestamp_nst = unix_milliseconds_to_nst(frame_timestamp:le_uint64())
+    ffxiv_tree:add(proto_field.frame_timestamp, frame_timestamp, frame_timestamp_nst)
+
+    -- add compress info
+    local msg_compressed = buf(OFFSET_HEADER_MSG_COMPRESSED, 1)
+    ffxiv_tree:add_le(proto_field.msg_compressed, msg_compressed)
+
+    -- add message tree
+    local msg_buf = buf:range(FRAME_HEADER_LEN) -- skip header length
+    local msg_tree = ffxiv_tree:add(msg_buf, "Messages")
+
+    -- add message count
+    -- do note that this info still comes from the frame header
+    local msg_count = buf(OFFSET_HEADER_MSG_COUNT, 2)
+    msg_tree:add_le(proto_field.msg_count, msg_count)
+
+    -- inflate first if compressed
+    if msg_compressed:uint() == 1 then
+        msg_buf = msg_buf:uncompress()
+    end
+    dissect_payload(msg_buf, pkt_info, msg_tree) -- dissect payload
+
+    return frame_len
+end
+
+function dissect_payload(buf, pkt_info, tree)
+    -- do nothing
+    local offset = 0
+    while buf:len() > offset do
+        local msg_len_tvb = buf:range(offset, 4)
+        local msg_len = msg_len_tvb:le_uint()
+        if msg_len == 0 then
+            -- invalid length
+            -- TODO: error expert
+            return
+        end
+
+        local msg_buf = buf:range(offset, msg_len)
+
+        -- create tree
+        local msg_tree = tree:add(msg_buf, string.format("Message (%i bytes)", msg_len))
+
+        -- add msg len
+        msg_tree:add_le(proto_field.msg_len, msg_len_tvb)
+
+        -- dissect messages
+        dissect_message(msg_buf, pkt_info, msg_tree)
+
+        offset = offset + msg_len
+    end
+end
+
+function dissect_message(buf, pkt_info, tree)
+    tree:add_le(proto_field.msg_type, buf(OFFSET_SUBHEADER_MSG_TYPE, 2))
+end
+
+function check_frame_length(buf)
+    if buf:len() < OFFSET_HEADER_FRAME_LEN + 4 then
+        -- too short to get a frame length!
+        return -DESEGMENT_ONE_MORE_SEGMENT
+    end
+
+    local frame_len = get_frame_length_tvb(buf):le_uint()
+    if buf:len() < frame_len then -- if buffer is smaller than frame length
+        -- then we need more bytes!
+        return -(frame_len - buf:len())
+    end
+
+    return frame_len
+end
+
+-- get frame length from the header buffer
+function get_frame_length_tvb(buf)
+    return buf:range(OFFSET_HEADER_FRAME_LEN, 4)
+end
+
+-- attempt to find a packet that follows FFXIV packet convention
+ffxiv_proto:register_heuristic("tcp", function (buf, pkt_info, tree)
+    -- check if packet has enough room for header
+    if buf:len() < FRAME_HEADER_LEN then
         return false
     end
 
-    -- if first 16 bytes are equal to predefined value, (52 52..)
-    -- this our packet!
-    local sig = buf(0, 16)
+    -- check if first 16 bytes are equal to predefined value
     local sig_expected = ByteArray.new("52 52 A0 41 FF 5D 46 E2 7F 2A 64 4D 7B 99 C4 75")
-    if sig:tvb() == sig_expected:tvb() then
-        return true
+    if buf(0, 16):tvb() ~= sig_expected:tvb() then
+        -- return false if does not match
+        return false
     end
 
-    -- check frame length == packet length
-    local frame_len = buf(OFFSET_HEADER_FRAME_LEN, 4):uint()
-    if frame_len == buf:reported_len() then
-        return true
-    end
+    -- looks like a packet from FFXIV! so let's dissect it!
+    ffxiv_proto.dissector(buf, pkt_info, tree)
+    -- use ffxiv dissector for same addr:port
+    pkt_info.conversation = ffxiv_proto
 
-    -- not a ffxiv packet :<
-    return false
-end
+    return true
+end)
 
 -- takes uint64 timestamp as a unix epoch in millisecond,
 -- convert it to NSTime
-function nstime_from_unix_msec(timestamp)
+function unix_milliseconds_to_nst(timestamp)
     local ts_sec = (timestamp / 1000):tonumber()
     local ts_nano = (timestamp % 1000):tonumber() * 1000000
     return NSTime.new(ts_sec, ts_nano)
 end
 
--- register it for tcp port 42424 (algo project)
+-- register it for tcp port 42424 (used by algo project)
 local tcp_table = DissectorTable.get("tcp.port")
 tcp_table:add(42424, ffxiv_proto)

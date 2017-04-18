@@ -1,10 +1,10 @@
 -- internal constants
 local FRAME_HEADER_LEN = 40
 local MSG_HEADER_LEN = 16
+local INVALID_ENTITY_ID = 0xE0000000 -- reffered as INVALID_GAME_OBJECT_ID in lua dump
 
 -- create protocol
-local ffxiv_proto = Proto("ffxiv", "FFXIV", "FINAL FANTASY XIV: Heavensward Protocol")
-
+local ffxiv_proto = Proto("ffxiv", "FINAL FANTASY XIV Network Protocol")
 -- generic header offset
 local OFFSET_HEADER_TIMESTAMP         = 0x10 -- unixtime in millisecond
 local OFFSET_HEADER_FRAME_LEN         = 0x18 -- frame length in bytes (includes 40bytes header!)
@@ -15,11 +15,13 @@ local OFFSET_HEADER_UNKNOWN2          = 0x20
 local OFFSET_HEADER_MSG_COMPRESSED    = 0x21 -- if 1, payload is compressed with deflate
 
 -- message subheader offset
+local OFFSET_SUBHEADER_MSG_SRC  = 0x4
+local OFFSET_SUBHEADER_MSG_DST  = 0x8
 local OFFSET_SUBHEADER_MSG_TYPE = 0xC
 
 -- field display
 local MESSAGE_TYPE_DISPLAY = {
-    [3] = "Normal?",
+    [3] = "Game", -- also used in FFXIV 1.0?
     [7] = "Ping",
     [8] = "Pong",
 }
@@ -28,7 +30,7 @@ local MESSAGE_TYPE_DISPLAY = {
 local proto_field = {
     -- generic header fields
     frame_unknown0  = ProtoField.bytes("ffxiv.frame.unknown0", "Unknown0"),
-    frame_unknown1  = ProtoField.uint16("ffxiv.frame.unknown1", "Unknown1"),
+    frame_unknown1  = ProtoField.uint16("ffxiv.frame.unknown1", "Connection Type"),
     frame_unknown2  = ProtoField.bool("ffxiv.frame.unknown2", "Unknown2"),
     frame_len       = ProtoField.uint32("ffxiv.frame.length", "Frame Length"),
     frame_timestamp = ProtoField.absolute_time("ffxiv.frame.timestamp", "Frame Timestamp"),
@@ -38,6 +40,8 @@ local proto_field = {
     msg_compressed = ProtoField.bool("ffxiv.message.compressed", "Payload is Compressed?"),
     msg_len        = ProtoField.uint32("ffxiv.message.length", "Message Length"),
     msg_type       = ProtoField.uint16("ffxiv.message.type", "Message Type", nil, MESSAGE_TYPE_DISPLAY),
+    msg_source_ent = ProtoField.uint32("ffxiv.message.source_ent", "Source Entity", base.HEX),
+    msg_target_ent = ProtoField.uint32("ffxiv.message.target_ent", "Target Entity", base.HEX),
 }
 ffxiv_proto.fields = proto_field
 
@@ -79,7 +83,7 @@ function dissect_frame(buf, pkt_info, tree)
 
     -- we're good now, let's dissect it!
     local buf = buf:range(0, frame_len) -- ignore after frame length
-    local ffxiv_tree = tree:add(ffxiv_proto, buf, nil, "FINAL FANTASY XIV Network Protocol")
+    local ffxiv_tree = tree:add(ffxiv_proto, buf)
 
     -- TODO: maybe just split between parsing part and tree part?
     -- because it's bit stupid to place here for field order
@@ -145,6 +149,8 @@ function dissect_payload(buf, pkt_info, tree)
 end
 
 function dissect_message(buf, pkt_info, tree)
+    tree:add_le(proto_field.msg_source_ent, buf(OFFSET_SUBHEADER_MSG_SRC, 4))
+    tree:add_le(proto_field.msg_target_ent, buf(OFFSET_SUBHEADER_MSG_DST, 4))
     tree:add_le(proto_field.msg_type, buf(OFFSET_SUBHEADER_MSG_TYPE, 2))
 end
 

@@ -18,12 +18,23 @@ local OFFSET_HEADER_MSG_COMPRESSED    = 0x21 -- if 1, payload is compressed with
 local OFFSET_SUBHEADER_MSG_SRC  = 0x4
 local OFFSET_SUBHEADER_MSG_DST  = 0x8
 local OFFSET_SUBHEADER_MSG_TYPE = 0xC
+local OFFSET_SUBHEADER_MSG_OPCODE = 0x12
+local OFFSET_SUBHEADER_MSG_TIMESTAMP = 0x14
+local OFFSET_SUBHEADER_MSG_DATA = 0x20
 
 -- field display
 local MESSAGE_TYPE_DISPLAY = {
+    [1] = "ClientWorld",
+    [2] = "ServerWorld",
     [3] = "Game", -- also used in FFXIV 1.0?
     [7] = "Ping",
     [8] = "Pong",
+    [9] = "ClientHandshake",
+    [10] = "ServerHandshake",
+}
+
+local MESSAGE_OPCODE_DISPLAY = {
+    [0x142] = "ActorEvent",
 }
 
 -- Protocol fields
@@ -42,6 +53,9 @@ local proto_field = {
     msg_type       = ProtoField.uint16("ffxiv.message.type", "Message Type", nil, MESSAGE_TYPE_DISPLAY),
     msg_source_ent = ProtoField.uint32("ffxiv.message.source_ent", "Source Entity", base.HEX),
     msg_target_ent = ProtoField.uint32("ffxiv.message.target_ent", "Target Entity", base.HEX),
+    msg_opcode     = ProtoField.uint16("ffxiv.message.opcode", "Opcode", base.HEX, MESSAGE_OPCODE_DISPLAY),
+    -- msg_timestamp  = ProtoField.new("ffxiv.message.timestamp", "Message Timestamp", ftypes.ABSOLUTE_TIME),
+    msg_data  = ProtoField.bytes("ffxiv.message.data", "Data"),
 }
 ffxiv_proto.fields = proto_field
 
@@ -142,16 +156,27 @@ function dissect_payload(buf, pkt_info, tree)
         msg_tree:add_le(proto_field.msg_len, msg_len_tvb)
 
         -- dissect messages
-        dissect_message(msg_buf, pkt_info, msg_tree)
+        dissect_message_payload(msg_buf, pkt_info, msg_tree)
 
         offset = offset + msg_len
     end
 end
 
-function dissect_message(buf, pkt_info, tree)
+function dissect_message_payload(buf, pkt_info, tree)
     tree:add_le(proto_field.msg_source_ent, buf(OFFSET_SUBHEADER_MSG_SRC, 4))
     tree:add_le(proto_field.msg_target_ent, buf(OFFSET_SUBHEADER_MSG_DST, 4))
-    tree:add_le(proto_field.msg_type, buf(OFFSET_SUBHEADER_MSG_TYPE, 2))
+
+    local msg_type_tvb = buf(OFFSET_SUBHEADER_MSG_TYPE, 2)
+    tree:add_le(proto_field.msg_type, msg_type_tvb)
+    if msg_type_tvb:le_uint() == 3 then
+        -- message
+        tree:add_le(proto_field.msg_opcode, buf(OFFSET_SUBHEADER_MSG_OPCODE, 2))
+        -- tree:add_le(proto_field.msg_timestamp, buf(OFFSET_SUBHEADER_MSG_TIMESTAMP, 4))
+        local data_len = buf:len() - 0x20
+        if data_len > 0 then
+            tree:add(proto_field.msg_data, buf(OFFSET_SUBHEADER_MSG_DATA, data_len))
+        end
+    end
 end
 
 function check_frame_length(buf)
